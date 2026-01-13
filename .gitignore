@@ -17,7 +17,21 @@ yarn.lock
 .env.test
 .env.production
 .env.*.local
-*.env
+
+# Python virtual environments
+.env/
+venv/
+env/
+.venv/
+ENV/
+virtualenv/
+
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
 
 # Logs
 logs/

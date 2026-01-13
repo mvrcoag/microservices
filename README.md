@@ -49,16 +49,20 @@ Este proyecto implementa una arquitectura de microservicios simple con los sigui
        │
        │ Red Interna (bridge)
        │
-       ▼
-┌─────────────────────┐
-│  Servicio Users     │ ◄── Puerto 3000 (interno)
-│  (Hono)             │
-└─────────────────────┘
+       ├─────────────────┬─────────────────┐
+       ▼                 ▼                 ▼
+┌───────────────┐ ┌───────────────┐ ┌───────────────┐
+│ Servicio Users│ │Servicio Orders│ │  Más servicios│
+│ (Hono)        │ │ (FastAPI)     │ │  (futuro...)  │
+│ Puerto 3000   │ │ Puerto 8000   │ │               │
+└───────────────┘ └───────────────┘ └───────────────┘
 ```
 
 ### Flujo de Comunicación
 
-1. El cliente hace una petición a `http://localhost:4000/api/users/...`
+1. El cliente hace una petición a `http://localhost:4000/api/{servicio}/...`
+   - Ejemplo: `http://localhost:4000/api/users/...`
+   - Ejemplo: `http://localhost:4000/api/orders`
 2. El **API Gateway** recibe la petición
 3. El Gateway aplica:
    - Rate limiting (límite de peticiones)
@@ -81,6 +85,11 @@ Este proyecto implementa una arquitectura de microservicios simple con los sigui
 - **Hono**: Framework web ultrarrápido y ligero
 - **@hono/node-server**: Adaptador de Hono para Node.js
 
+### Servicio Orders
+- **FastAPI**: Framework moderno de Python para construir APIs de alto rendimiento
+- **Uvicorn**: Servidor ASGI ultrarrápido para aplicaciones Python
+- **Pydantic**: Validación de datos y configuración mediante type hints de Python
+
 ### Infraestructura
 - **Docker**: Contenedores para empaquetar los servicios
 - **Docker Compose**: Orquestación de múltiples contenedores
@@ -97,19 +106,27 @@ microservices/
 ├── services/
 │   ├── gateway/                # API Gateway
 │   │   ├── src/
-│   │   │   └── main.ts        # Código principal del gateway
+│   │   │   ├── main.ts        # Código principal del gateway
+│   │   │   ├── limiter.ts     # Configuración de rate limiting
+│   │   │   └── loggers.ts     # Configuración de logging
 │   │   ├── Dockerfile         # Imagen Docker del gateway
 │   │   ├── package.json       # Dependencias del gateway
 │   │   ├── tsconfig.json      # Configuración TypeScript
 │   │   └── .env               # Variables de entorno (no en Git)
 │   │
-│   └── users/                  # Servicio de Usuarios
-│       ├── src/
-│       │   └── index.ts       # Código principal del servicio
+│   ├── users/                  # Servicio de Usuarios (Node.js)
+│   │   ├── src/
+│   │   │   └── index.ts       # Código principal del servicio
+│   │   ├── Dockerfile         # Imagen Docker del servicio
+│   │   ├── package.json       # Dependencias del servicio
+│   │   ├── tsconfig.json      # Configuración TypeScript
+│   │   └── .env               # Variables de entorno (no en Git)
+│   │
+│   └── orders/                 # Servicio de Pedidos (Python)
+│       ├── main.py            # Código principal del servicio
+│       ├── requirements.txt   # Dependencias de Python
 │       ├── Dockerfile         # Imagen Docker del servicio
-│       ├── package.json       # Dependencias del servicio
-│       ├── tsconfig.json      # Configuración TypeScript
-│       └── .env               # Variables de entorno (no en Git)
+│       └── .env               # Entorno virtual de Python (no en Git)
 ```
 
 ## Componentes Principales
@@ -118,22 +135,31 @@ microservices/
 
 El **API Gateway** es el punto de entrada único a la arquitectura de microservicios. Sus responsabilidades incluyen:
 
-#### Rate Limiting
+#### Arquitectura Modular
+El gateway está organizado en módulos separados para mejor mantenibilidad:
+
+- **`main.ts`**: Configuración principal y orquestación de middlewares
+- **`limiter.ts`**: Configuración de rate limiting
+- **`loggers.ts`**: Configuración de Winston para logging
+
+#### Rate Limiting (`limiter.ts`)
 Limita las peticiones a 3 por minuto por IP para prevenir abusos:
 
 ```typescript
-const limiter = rateLimit({
+export const limiter = rateLimit({
   windowMs: 60 * 1000,  // Ventana de 1 minuto
   max: 3,                // Máximo 3 peticiones
-  message: { error: "Max requests per minute reached" }
+  message: { error: "Max requests per minute reached" },
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 ```
 
-#### Logging
+#### Logging (`loggers.ts`)
 Registra todas las peticiones en consola y en archivo usando Winston:
 
 ```typescript
-const logger = winston.createLogger({
+export const logger = winston.createLogger({
   level: "info",
   format: winston.format.combine(
     winston.format.timestamp(),
@@ -146,25 +172,32 @@ const logger = winston.createLogger({
 });
 ```
 
-#### Proxy Reverso
-Redirige las peticiones a los microservicios correspondientes:
+#### Proxy Reverso Dinámico (`main.ts`)
+Redirige las peticiones a los microservicios correspondientes mediante un loop escalable:
 
 ```typescript
-app.use(
-  `/api/users`,
-  createProxyMiddleware({
-    target: process.env.USERS_SERVICE_URL,
-    changeOrigin: true,
-    pathRewrite: {
-      [`^/api/users`]: "",  // Elimina el prefijo /api/users
-    },
-  })
-);
+const services = {
+  users: process.env.USERS_SERVICE_URL,
+  orders: process.env.ORDERS_SERVICE_URL,
+};
+
+for (const [service, target] of Object.entries(services)) {
+  app.use(
+    `/api/${service}`,
+    createProxyMiddleware({
+      target,
+      changeOrigin: true,
+      pathRewrite: {
+        [`^/api/${service}`]: "/",
+      },
+    }),
+  );
+}
 ```
 
 ### 2. Servicio Users (`services/users`)
 
-Un microservicio simple que maneja operaciones relacionadas con usuarios. Usa **Hono**, un framework web ultrarrápido.
+Un microservicio simple que maneja operaciones relacionadas con usuarios. Usa **Hono**, un framework web ultrarrápido basado en Node.js/TypeScript.
 
 #### Endpoint de Health Check
 ```typescript
@@ -176,14 +209,35 @@ app.get("/health/:id", (c) => {
 
 Este servicio está aislado y solo es accesible a través del API Gateway en la red interna de Docker.
 
+### 3. Servicio Orders (`services/orders`)
+
+Un microservicio construido con **FastAPI** (Python) que maneja operaciones relacionadas con pedidos. Este servicio demuestra la flexibilidad de usar diferentes tecnologías en una arquitectura de microservicios.
+
+#### Características
+- **Framework**: FastAPI, un framework moderno y de alto rendimiento para Python
+- **Servidor**: Uvicorn (ASGI server)
+- **Puerto**: 8000
+- **Validación**: Pydantic para validación automática de datos
+
+#### Endpoint Principal
+```python
+@app.get("/")
+def get_orders():
+    return {"orders": [1, 2, 3]}
+```
+
+Este servicio solo es accesible a través del API Gateway mediante `http://localhost:4000/api/orders`.
+
 ## Requisitos Previos
 
 Antes de ejecutar este proyecto, asegúrate de tener instalado:
 
-- **Node.js** (versión 18 o superior)
+- **Node.js** (versión 18 o superior) - Para servicios en TypeScript/JavaScript
+- **Python** (versión 3.11 o superior) - Para el servicio de Orders
 - **Docker** (versión 20 o superior)
 - **Docker Compose** (versión 2 o superior)
-- **npm** o **yarn**
+- **npm** o **yarn** - Para gestión de paquetes de Node.js
+- **pip** - Para gestión de paquetes de Python
 
 ## Instalación y Ejecución
 
@@ -221,6 +275,7 @@ npm install
 # Crear archivo .env
 echo "PORT=3000" > .env
 echo "USERS_SERVICE_URL=http://localhost:3001" >> .env
+echo "ORDERS_SERVICE_URL=http://localhost:8000" >> .env
 
 # Ejecutar en modo desarrollo
 npm run dev
@@ -234,6 +289,19 @@ echo "PORT=3001" > .env
 
 # Ejecutar en modo desarrollo
 npm run dev
+
+# 3. En otra terminal, configurar el servicio Orders
+cd services/orders
+
+# Crear entorno virtual de Python
+python3 -m venv .env
+source .env/bin/activate  # En Windows: .env\Scripts\activate
+
+# Instalar dependencias
+pip install -r requirements.txt
+
+# Ejecutar en modo desarrollo
+uvicorn main:app --reload --port 8000
 ```
 
 ## Probando los Servicios
@@ -243,11 +311,17 @@ Una vez que los servicios estén ejecutándose, puedes probarlos:
 ### Usando curl
 
 ```bash
-# Health check a través del API Gateway
+# Health check del servicio Users a través del API Gateway
 curl http://localhost:4000/api/users/health/123
 
 # Respuesta esperada:
 # Users service running 123
+
+# Obtener pedidos del servicio Orders a través del API Gateway
+curl http://localhost:4000/api/orders
+
+# Respuesta esperada:
+# {"orders":[1,2,3]}
 ```
 
 ### Usando el navegador
@@ -255,6 +329,7 @@ curl http://localhost:4000/api/users/health/123
 Abre tu navegador y visita:
 ```
 http://localhost:4000/api/users/health/test
+http://localhost:4000/api/orders
 ```
 
 ### Probando el Rate Limiting
@@ -345,6 +420,7 @@ Configuración que se inyecta en tiempo de ejecución:
 ```env
 PORT=3000                                    # Puerto interno del gateway
 USERS_SERVICE_URL=http://users:3000        # URL del servicio de usuarios
+ORDERS_SERVICE_URL=http://orders:8000      # URL del servicio de pedidos
 ```
 
 ### Users Service (`services/users/.env`)
@@ -353,15 +429,37 @@ USERS_SERVICE_URL=http://users:3000        # URL del servicio de usuarios
 PORT=3000                                    # Puerto del servicio
 ```
 
+### Orders Service
+
+El servicio de Orders no requiere un archivo `.env` para su configuración básica. FastAPI y Uvicorn usan el puerto especificado en el comando de ejecución (8000).
+
 ### Docker Compose
 
-Las variables de entorno también se pueden configurar en `docker-compose.yml`:
+Las variables de entorno se configuran en `docker-compose.yml`:
 
 ```yaml
-environment:
-  - PORT=3000
-  - USERS_SERVICE_URL=http://users:3000
+gateway:
+  environment:
+    - PORT=3000
+    - USERS_SERVICE_URL=http://users:3000
+    - ORDERS_SERVICE_URL=http://orders:8000
+  depends_on:
+    - users
+    - orders
 ```
+
+## Ventajas del Enfoque Poliglota
+
+Este proyecto demuestra una ventaja clave de los microservicios: **la libertad tecnológica**. Hemos implementado:
+
+- **Gateway y Users**: Node.js/TypeScript con Express y Hono
+- **Orders**: Python con FastAPI
+
+Cada servicio usa la tecnología más apropiada para sus necesidades, demostrando que en una arquitectura de microservicios puedes:
+- Elegir el lenguaje y framework más adecuado para cada tarea
+- Aprovechar las fortalezas específicas de cada tecnología
+- Permitir que diferentes equipos trabajen con sus tecnologías preferidas
+- Migrar servicios individuales sin afectar el resto del sistema
 
 ## Próximos Pasos
 
@@ -370,12 +468,12 @@ Para expandir este proyecto educativo, considera implementar:
 1. **Autenticación y Autorización**
    - JWT (JSON Web Tokens)
    - OAuth 2.0
-   - Middleware de autenticación
+   - Middleware de autenticación en el Gateway
 
 2. **Más Microservicios**
    - Servicio de productos
-   - Servicio de pedidos
    - Servicio de notificaciones
+   - Servicio de pagos
 
 3. **Base de Datos**
    - PostgreSQL para cada servicio

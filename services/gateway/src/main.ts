@@ -1,23 +1,11 @@
 import "dotenv/config";
 import express from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
-import winston from "winston";
 import morgan from "morgan";
-import rateLimit from "express-rate-limit";
+import { logger } from "./loggers";
+import { limiter } from "./limiter";
 
 const app = express();
-
-const logger = winston.createLogger({
-  level: "info",
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.json(),
-  ),
-  transports: [
-    new winston.transports.Console(),
-    new winston.transports.File({ filename: "requests.log" }),
-  ],
-});
 
 app.use(
   morgan("combined", {
@@ -25,18 +13,11 @@ app.use(
   }),
 );
 
-const limiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 3,
-  message: { error: "Max requests per minute reached" },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
 app.use(limiter);
 
 const services = {
   users: process.env.USERS_SERVICE_URL,
+  orders: process.env.ORDERS_SERVICE_URL,
 };
 
 for (const [service, target] of Object.entries(services)) {
@@ -46,7 +27,7 @@ for (const [service, target] of Object.entries(services)) {
       target,
       changeOrigin: true,
       pathRewrite: {
-        [`^/api/${service}`]: "",
+        [`^/api/${service}`]: "/",
       },
     }),
   );
